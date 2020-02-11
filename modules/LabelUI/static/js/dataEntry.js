@@ -1,30 +1,38 @@
 /*
     Definition of a data entry, as shown on a grid on the screen.
 
-    2019 Benjamin Kellenberger
+    2019-20 Benjamin Kellenberger
  */
 
 class AbstractDataEntry {
     /*
        Abstract base class for data entries.
     */
-   constructor(entryID, properties, disableInteractions) {
-       this.entryID = entryID;
-       this.canvasID = entryID + '_canvas';
-       this.fileName = properties['fileName'];
-       this.disableInteractions = disableInteractions;
+    constructor(entryID, properties, disableInteractions) {
+        this.entryID = entryID;
+        this.canvasID = entryID + '_canvas';
+        this.fileName = properties['fileName'];
+        this.disableInteractions = disableInteractions;
 
-       this._setup_viewport();
-       this._setup_markup();
-       this._createImageEntry();
-       this._parseLabels(properties);
-
-       this.startTime = new Date();
-
-       // for interaction handlers
-       this.mouseDown = false;
-       this.mouseDrag = false;
-   }
+        // for interaction handlers
+        this.mouseDown = false;
+        this.mouseDrag = false;
+        var self = this;
+        this._setup_viewport();
+        this._setup_markup();
+        this.loadingPromise = this._loadImage(this.getImageURI()).then(image => {
+            self._createImageEntry(image);
+            self._parseLabels(properties);
+            self.startTime = new Date();
+            self.render();
+            return true;
+        })
+        .catch(error => {
+            self._createImageEntry(null);
+            self.render();
+            return false;
+        });
+    }
 
    _click(event) {
        /*
@@ -225,10 +233,20 @@ class AbstractDataEntry {
        }
    }
 
-   _createImageEntry() {
-       this.imageEntry = new ImageElement(this.entryID + '_image', this.viewport, this.getImageURI());
-       this.viewport.addRenderElement(this.imageEntry);
-   }
+    _loadImage(imageURI) {
+        return new Promise(resolve => {
+            const image = new Image();
+            image.addEventListener('load', () => {
+                resolve(image);
+            });
+            image.src = imageURI;
+        });
+    }
+
+    _createImageEntry(image) {
+        this.imageEntry = new ImageElement(this.entryID + '_image', image, this.viewport);
+        this.viewport.addRenderElement(this.imageEntry);
+    }
 
    _setup_markup() {
        // var colSize = Math.round(12 / window.numImages_x);  // for bootstrap
@@ -405,143 +423,144 @@ class ClassificationEntry extends AbstractDataEntry {
        colored w.r.t. the user-selected class. A second click removes the user
        label again.
     */
-   constructor(entryID, properties) {
-       super(entryID, properties);
+    constructor(entryID, properties) {
+        super(entryID, properties);
+        
+        this._setup_markup();
+        this.loadingPromise.then(response => {
+            if(this.labelInstance == null) {
+                // add a default, blank instance if nothing has been predicted or annotated yet
+                var label = (window.enableEmptyClass ? null : window.labelClassHandler.getActiveClassID());
+                this._addElement(new Annotation(window.getRandomID(), {'label':label}, 'labels', 'annotation'));
+            }
+        });
+    }
 
-       if(this.labelInstance == null) {
-           // add a default, blank instance if nothing has been predicted or annotated yet
-           var label = (window.enableEmptyClass ? null : window.labelClassHandler.getActiveClassID());
-           this._addElement(new Annotation(window.getRandomID(), {'label':label}, 'labels', 'annotation'));
-       }
+    getAnnotationType() {
+        return 'label';
+    }
 
-       this._setup_markup();
-   }
+    _addElement(element) {
+        // allow only one label for classification entry
+        var key = element['annotationID'];
+        if(element['type'] == 'annotation') {
+            if(Object.keys(this.annotations).length > 0) {
+                // replace current annotation
+                var currentKey = Object.keys(this.annotations)[0];
+                this.viewport.removeRenderElement(this.annotations[currentKey]);
+                delete this.annotations[currentKey];
+            }
 
-   getAnnotationType() {
-       return 'label';
-   }
+            // add new annotation from existing
+            var unsure = element['geometry']['unsure'];
+            var anno = new Annotation(key, {'label':element['label'], 'unsure':unsure}, 'labels', element['type']);
+            this.annotations[key] = anno;
+            this.viewport.addRenderElement(anno.getRenderElement());
+            this.labelInstance = anno;
 
-   _addElement(element) {
-       // allow only one label for classification entry
-       var key = element['annotationID'];
-       if(element['type'] == 'annotation') {
-           if(Object.keys(this.annotations).length > 0) {
-               // replace current annotation
-               var currentKey = Object.keys(this.annotations)[0];
-               this.viewport.removeRenderElement(this.annotations[currentKey]);
-               delete this.annotations[currentKey];
-           }
+            // flip text color of BorderStrokeElement if needed
+            var htFill = this.labelInstance.geometry.getProperty('fillColor');
+            if(htFill != null && window.getBrightness(htFill) >= 92) {
+                this.labelInstance.geometry.setProperty('textColor', '#000000');
+            } else {
+                this.labelInstance.geometry.setProperty('textColor', '#FFFFFF');
+            }
+            
+        } else if(element['type'] == 'prediction' && window.showPredictions) {
+            this.predictions[key] = element;
+            this.viewport.addRenderElement(element.getRenderElement());
+        }
 
-           // add new annotation from existing
-           var unsure = element['geometry']['unsure'];
-           var anno = new Annotation(key, {'label':element['label'], 'unsure':unsure}, 'labels', element['type']);
-           this.annotations[key] = anno;
-           this.viewport.addRenderElement(anno.getRenderElement());
-           this.labelInstance = anno;
+        window.dataHandler.updatePresentClasses();
+    }
 
-           // flip text color of BorderStrokeElement if needed
-           var htFill = this.labelInstance.geometry.getProperty('fillColor');
-           if(htFill != null && window.getBrightness(htFill) >= 92) {
-               this.labelInstance.geometry.setProperty('textColor', '#000000');
-           } else {
-               this.labelInstance.geometry.setProperty('textColor', '#FFFFFF');
-           }
-           
-       } else if(element['type'] == 'prediction' && window.showPredictions) {
-           this.predictions[key] = element;
-           this.viewport.addRenderElement(element.getRenderElement());
-       }
+    _setup_markup() {
+        var self = this;
+        super._setup_markup();
+        $(this.canvas).css('cursor', window.uiControlHandler.getDefaultCursor());
 
-       window.dataHandler.updatePresentClasses();
-   }
+        var htStyle = {
+            fillColor: window.styles.hoverText.box.fill,
+            textColor: window.styles.hoverText.text.color,
+            strokeColor: window.styles.hoverText.box.stroke.color,
+            lineWidth: window.styles.hoverText.box.stroke.lineWidth
+        };
+        this.hoverTextElement = new HoverTextElement(this.entryID + '_hoverText', null, null, 'validArea',
+            htStyle,
+            5);
+        this.viewport.addRenderElement(this.hoverTextElement);
 
-   _setup_markup() {
-       var self = this;
-       super._setup_markup();
-       $(this.canvas).css('cursor', window.uiControlHandler.getDefaultCursor());
+        if(!this.disableInteractions) {
+            // click handler
+            this.markup.mouseup(function(event) {
+                if(window.uiBlocked) return;
+                else if(window.uiControlHandler.getAction() === ACTIONS.DO_NOTHING) {
+                    if(window.unsureButtonActive) {
+                        self.labelInstance.setProperty('unsure', !self.labelInstance.getProperty('unsure'));
+                        window.unsureButtonActive = false;
+                        self.render();
+                    } else {
+                        self.toggleUserLabel(event.altKey);
+                    }
+                }
 
-       var htStyle = {
-           fillColor: window.styles.hoverText.box.fill,
-           textColor: window.styles.hoverText.text.color,
-           strokeColor: window.styles.hoverText.box.stroke.color,
-           lineWidth: window.styles.hoverText.box.stroke.lineWidth
-       };
-       this.hoverTextElement = new HoverTextElement(this.entryID + '_hoverText', null, null, 'validArea',
-           htStyle,
-           5);
-       this.viewport.addRenderElement(this.hoverTextElement);
+                window.dataHandler.updatePresentClasses();
+            });
 
-       if(!this.disableInteractions) {
-           // click handler
-           this.markup.mouseup(function(event) {
-               if(window.uiBlocked) return;
-               else if(window.uiControlHandler.getAction() === ACTIONS.DO_NOTHING) {
-                   if(window.unsureButtonActive) {
-                       self.labelInstance.setProperty('unsure', !self.labelInstance.getProperty('unsure'));
-                       window.unsureButtonActive = false;
-                       self.render();
-                   } else {
-                       self.toggleUserLabel(event.altKey);
-                   }
-               }
+            // tooltip for label change
+            this.markup.mousemove(function(event) {
+                if(window.uiBlocked) return;
+                var pos = self.viewport.getRelativeCoordinates(event, 'validArea');
 
-               window.dataHandler.updatePresentClasses();
-           });
+                // offset tooltip position if loupe is active
+                if(window.uiControlHandler.showLoupe) {
+                    pos[0] += 0.2;  //TODO: does not account for zooming in
+                }
 
-           // tooltip for label change
-           this.markup.mousemove(function(event) {
-               if(window.uiBlocked) return;
-               var pos = self.viewport.getRelativeCoordinates(event, 'validArea');
+                self.hoverTextElement.position = pos;
+                if(window.uiControlHandler.getAction() in [ACTIONS.DO_NOTHING,
+                    ACTIONS.ADD_ANNOTATION,
+                    ACTIONS.REMOVE_ANNOTATIONS]) {
+                    if(event.altKey) {
+                        self.hoverTextElement.setProperty('text', 'mark as unlabeled');
+                        self.hoverTextElement.setProperty('fillColor', window.styles.hoverText.box.fill);
+                    } else if(window.unsureButtonActive) {
+                        self.hoverTextElement.setProperty('text', 'toggle unsure');
+                        self.hoverTextElement.setProperty('fillColor', window.styles.hoverText.box.fill);
+                    } else if(self.labelInstance == null) {
+                        self.hoverTextElement.setProperty('text', 'set label to "' + window.labelClassHandler.getActiveClassName() + '"');
+                        self.hoverTextElement.setProperty('fillColor', window.labelClassHandler.getActiveColor());
+                    } else if(self.labelInstance.label != window.labelClassHandler.getActiveClassID()) {
+                        self.hoverTextElement.setProperty('text', 'change label to "' + window.labelClassHandler.getActiveClassName() + '"');
+                        self.hoverTextElement.setProperty('fillColor', window.labelClassHandler.getActiveColor());
+                    } else {
+                        self.hoverTextElement.setProperty('text', null);
+                    }
+                } else {
+                    self.hoverTextElement.setProperty('text', null);
+                }
 
-               // offset tooltip position if loupe is active
-               if(window.uiControlHandler.showLoupe) {
-                   pos[0] += 0.2;  //TODO: does not account for zooming in
-               }
+                // flip text color if needed
+                var htFill = self.hoverTextElement.getProperty('fillColor');
+                if(htFill != null && window.getBrightness(htFill) >= 92) {
+                    self.hoverTextElement.setProperty('textColor', '#000000');
+                } else {
+                    self.hoverTextElement.setProperty('textColor', '#FFFFFF');
+                }
 
-               self.hoverTextElement.position = pos;
-               if(window.uiControlHandler.getAction() in [ACTIONS.DO_NOTHING,
-                   ACTIONS.ADD_ANNOTATION,
-                   ACTIONS.REMOVE_ANNOTATIONS]) {
-                   if(event.altKey) {
-                       self.hoverTextElement.setProperty('text', 'mark as unlabeled');
-                       self.hoverTextElement.setProperty('fillColor', window.styles.hoverText.box.fill);
-                   } else if(window.unsureButtonActive) {
-                       self.hoverTextElement.setProperty('text', 'toggle unsure');
-                       self.hoverTextElement.setProperty('fillColor', window.styles.hoverText.box.fill);
-                   } else if(self.labelInstance == null) {
-                       self.hoverTextElement.setProperty('text', 'set label to "' + window.labelClassHandler.getActiveClassName() + '"');
-                       self.hoverTextElement.setProperty('fillColor', window.labelClassHandler.getActiveColor());
-                   } else if(self.labelInstance.label != window.labelClassHandler.getActiveClassID()) {
-                       self.hoverTextElement.setProperty('text', 'change label to "' + window.labelClassHandler.getActiveClassName() + '"');
-                       self.hoverTextElement.setProperty('fillColor', window.labelClassHandler.getActiveColor());
-                   } else {
-                       self.hoverTextElement.setProperty('text', null);
-                   }
-               } else {
-                   self.hoverTextElement.setProperty('text', null);
-               }
+                // set active (for e.g. "unsure" functionality)
+                self.labelInstance.setActive(true);
 
-               // flip text color if needed
-               var htFill = self.hoverTextElement.getProperty('fillColor');
-               if(htFill != null && window.getBrightness(htFill) >= 92) {
-                   self.hoverTextElement.setProperty('textColor', '#000000');
-               } else {
-                   self.hoverTextElement.setProperty('textColor', '#FFFFFF');
-               }
-
-               // set active (for e.g. "unsure" functionality)
-               self.labelInstance.setActive(true);
-
-               self.render();
-           });
-           this.markup.mouseout(function(event) {
-               if(window.uiBlocked) return;
-               self.hoverTextElement.setProperty('text', null);
-               self.labelInstance.setActive(false);
-               self.render();
-           });
-       }
-   }
+                self.render();
+            });
+            this.markup.mouseout(function(event) {
+                if(window.uiBlocked) return;
+                self.hoverTextElement.setProperty('text', null);
+                self.labelInstance.setActive(false);
+                self.render();
+            });
+        }
+    }
 
    setLabel(label) {
        if(this.labelInstance == null) {
@@ -1220,15 +1239,23 @@ class BoundingBoxAnnotationEntry extends AbstractDataEntry {
 
 
 class SemanticSegmentationEntry extends AbstractDataEntry {
-   /*
-       Implementation for segmentation maps.
+    /*
+        Implementation for segmentation maps.
     */
-   constructor(entryID, properties) {
-       super(entryID, properties);
+    constructor(entryID, properties) {
+        super(entryID, properties);
 
-       this._init_data(properties);
-       this._setup_markup();
-   }
+        this.loadingPromise.then(response => {
+            if(response) {
+                // store natural image dimensions for annotations
+                properties['width'] = this.imageEntry.image.naturalWidth;
+                properties['height'] = this.imageEntry.image.naturalHeight;
+                this._init_data(properties);
+            }
+        });
+        
+        this._setup_markup();
+    }
 
    getAnnotationType() {
        return 'segmentationMap';
@@ -1279,7 +1306,6 @@ class SemanticSegmentationEntry extends AbstractDataEntry {
            this.annotation = this.annotations[annoKeys[0]]; 
        } else {
            this.annotation = new Annotation(window.getRandomID(), properties, 'segmentationMasks', 'annotation');
-           this.annotation.geometry.setSize(this.viewport.transformCoordinates([1,1], 'validArea', false));
            this._addElement(this.annotation);
        }
        this.segMap = this.annotation.geometry;
@@ -1329,28 +1355,31 @@ class SemanticSegmentationEntry extends AbstractDataEntry {
                this.mousePos[1] * this.size[1]
            ];
 
-           // show brush
-           this.brush.setProperty('x', this.mousePos[0]);
-           this.brush.setProperty('y', this.mousePos[1]);
+            // show brush
+            this.brush.setProperty('x', this.mousePos[0]);
+            this.brush.setProperty('y', this.mousePos[1]);
 
-           // paint with brush at current position
-           if(this.mouseDown) {
-               var canvasScale = this.viewport.canvas.width() / this.viewport.canvas[0].width;
-               var brushSize = [
-                   window.uiControlHandler.segmentation_properties.brushSize / this.viewport.validArea[2] * canvasScale,
-                   window.uiControlHandler.segmentation_properties.brushSize / this.viewport.validArea[3] * canvasScale
-               ];
-               if(window.uiControlHandler.getAction() === ACTIONS.REMOVE_ANNOTATIONS || event.altKey) {
-                   this.segMap.clear(mousePos_abs,
-                       window.uiControlHandler.segmentation_properties.brushType,
-                       brushSize);
-               } else {
-                   this.segMap.paint(mousePos_abs,
-                       window.labelClassHandler.getActiveColor(),
-                       window.uiControlHandler.segmentation_properties.brushType,
-                       brushSize);
-               }
-           }
+            // paint with brush at current position
+            if(this.mouseDown) {
+                var canvasScale = [
+                    this.viewport.canvas.width() / this.imageEntry.image.naturalWidth,
+                    this.viewport.canvas.height() / this.imageEntry.image.naturalHeight
+                ];
+                var brushSize = [
+                    window.uiControlHandler.segmentation_properties.brushSize / canvasScale[1],
+                    window.uiControlHandler.segmentation_properties.brushSize / canvasScale[0]
+                ];
+                if(window.uiControlHandler.getAction() === ACTIONS.REMOVE_ANNOTATIONS || event.altKey) {
+                    this.segMap.clear(mousePos_abs,
+                        window.uiControlHandler.segmentation_properties.brushType,
+                        brushSize);
+                } else {
+                    this.segMap.paint(mousePos_abs,
+                        window.labelClassHandler.getActiveColor(),
+                        window.uiControlHandler.segmentation_properties.brushType,
+                        brushSize);
+                }
+            }
 
        } else {
            // hide brush
